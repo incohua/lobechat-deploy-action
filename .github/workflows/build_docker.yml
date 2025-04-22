@@ -21,7 +21,7 @@ concurrency:
 env:
   REGISTRY_IMAGE: ${{ secrets.DOCKER_REGISTRY_USER }}/lobe-chat-clerk
   PR_TAG_PREFIX: pr-
-  UPSTREAM_REPO: upstream-owner/upstream-repo
+  UPSTREAM_REPO: lobehub/lobe-chat  
 
 jobs:
   prepare:
