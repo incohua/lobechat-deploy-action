@@ -1,0 +1,62 @@
+name: Monitor Upstream Releases
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'  # 每6小时运行一次
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  check-upstream:
+    runs-on: ubuntu-latest
+    outputs:
+      new_release: ${{ steps.check.outputs.new_release }}
+      release_tag: ${{ steps.check.outputs.release_tag }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Get latest upstream release
+        id: check
+        run: |
+          # 替换为您要跟踪的仓库
+          REPO_OWNER="lobehub"
+          REPO_NAME="lobe-chat"
+          
+          # 获取最新release信息
+          LATEST_RELEASE=$(curl -s "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases/latest")
+          LATEST_TAG=$(echo $LATEST_RELEASE | jq -r '.tag_name')
+          
+          echo "Latest upstream release: $LATEST_TAG"
+          
+          # 检查我们是否已经处理过这个release
+          if [ -f "last_processed_release.txt" ]; then
+            LAST_PROCESSED=$(cat last_processed_release.txt)
+          else
+            LAST_PROCESSED=""
+          fi
+          
+          if [ "$LATEST_TAG" != "$LAST_PROCESSED" ]; then
+            echo "发现新版本: $LATEST_TAG (之前版本: $LAST_PROCESSED)"
+            echo "new_release=true" >> $GITHUB_OUTPUT
+            echo "release_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+            echo "$LATEST_TAG" > last_processed_release.txt
+            git config --global user.name "GitHub Actions Bot"
+            git config --global user.email "actions@github.com"
+            git add last_processed_release.txt
+            git commit -m "Update last processed release to $LATEST_TAG"
+            git push
+          else
+            echo "没有新版本，最新版本仍为: $LAST_PROCESSED"
+            echo "new_release=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Trigger build workflow
+        if: steps.check.outputs.new_release == 'true'
+        uses: peter-evans/repository-dispatch@v2
+        with:
+          token: ${{ secrets.REPO_ACCESS_TOKEN }}
+          event-type: new-upstream-release
+          client-payload: '{"release_tag": "${{ steps.check.outputs.release_tag }}"}'
