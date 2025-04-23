@@ -40,7 +40,7 @@ concurrency:
 jobs:
   build-and-publish:
     strategy:
-      fail-fast: on # 一个平台失败不取消其他平台
+      fail-fast: true # 一个平台失败不取消其他平台
       matrix:
         include:
           - platform: linux/amd64
