@@ -57,9 +57,9 @@ jobs:
 
     steps:
       - name: Harden Runner
-        uses: step-security/step-security/harden-runner@v2 # v2.9.0
+        uses: step-security/harden-runner@v2 # v2.9.0
         with:
-          egress-policy: audit
+          egress-policy: audit # TODO: change to 'egress-policy: block' after couple of runs
 
       - name: Checkout Workflow Repository (for custom files)
         uses: actions/checkout@v4
