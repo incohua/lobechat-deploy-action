@@ -20,7 +20,7 @@ concurrency:
 
 env:
   REGISTRY_IMAGE: ${{ secrets.DOCKER_REGISTRY_USER }}/lobe-chat-clerk
-  PR_TAG_PREFIX: pr-
+  PR_TAG_PREFIX: pr-build-
   UPSTREAM_REPO: lobehub/lobe-chat  
 
 jobs:
@@ -92,14 +92,29 @@ jobs:
         with:
           fetch-depth: 0
       
-      # 如果需要上游构建上下文，则检出上游仓库
-      - name: Checkout upstream repository
+      # 如果是上游构建，下载上游仓库的release源码
+      - name: Download upstream release source
         if: needs.prepare.outputs.build_context == 'upstream'
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.UPSTREAM_REPO }}
-          ref: ${{ needs.prepare.outputs.release_tag }}
-          path: upstream-temp
+        run: |
+          mkdir -p upstream-temp
+          cd upstream-temp
+          
+          RELEASE_TAG="${{ needs.prepare.outputs.release_tag }}"
+          REPO_PARTS=(${UPSTREAM_REPO//\// })
+          OWNER=${REPO_PARTS[0]}
+          REPO=${REPO_PARTS[1]}
+          
+          echo "下载 $OWNER/$REPO 的源码，版本: $RELEASE_TAG"
+          
+          # 下载源代码压缩包
+          curl -L "https://github.com/$OWNER/$REPO/archive/refs/tags/$RELEASE_TAG.tar.gz" -o source.tar.gz
+          
+          # 解压源代码
+          tar -xzf source.tar.gz --strip-components=1
+          rm source.tar.gz
+          
+          echo "上游代码下载完成，版本: $RELEASE_TAG"
+          ls -la
       
       # 准备构建上下文
       - name: Prepare build context
@@ -111,12 +126,26 @@ jobs:
             # 复制上游仓库内容
             cp -r upstream-temp/* build-context/
             
-            # 使用我们自己的Dockerfile和配置覆盖
-            cp Dockerfile build-context/
-            # 如有需要，覆盖其他特定文件
-            if [ -d "custom-config" ]; then
-              cp -r custom-config/* build-context/config/
-            fi
+           # 应用自定义修改
+           echo "应用自定义修改..."
+           
+           # 检查并替换 Dockerfile.database
+           if [ -f "custom/Dockerfile.database" ]; then
+             echo "替换 Dockerfile.database"
+             cp custom/Dockerfile.database build-context/
+           fi
+           
+           # 应用其他自定义文件
+           if [ -d "custom" ]; then
+             echo "应用其他自定义文件"
+             find custom -type f -not -name "Dockerfile.database" | while read file; do
+               target_file=${file#custom/}
+               target_dir=$(dirname "build-context/$target_file")
+               mkdir -p "$target_dir"
+               cp "$file" "build-context/$target_file"
+               echo "应用: $target_file"
+             done
+           fi
           else
             echo "基于本地仓库构建"
             # 直接使用本地仓库的内容
@@ -166,7 +195,7 @@ jobs:
         with:
           platforms: ${{ matrix.platform }}
           context: ./build-context
-          file: ./build-context/Dockerfile
+          file: ./build-context/Dockerfile.database
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             SHA=${{ steps.vars.outputs.sha_short }}
@@ -190,73 +219,3 @@ jobs:
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
-
-  merge:
-    name: Merge Images
-    needs: [prepare, build]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout base
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Download digests
-        uses: actions/download-artifact@v4
-        with:
-          path: /tmp/digests
-          pattern: digest-*
-          merge-multiple: true
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      # 为 merge job 添加 PR metadata 生成
-      - name: Generate PR metadata
-        if: github.event_name == 'pull_request'
-        id: pr_meta
-        run: |
-          branch_name="${{ github.head_ref }}"
-          sanitized_branch=$(echo "${branch_name}" | sed -E 's/[^a-zA-Z0-9_.-]+/-/g')
-          echo "pr_tag=${sanitized_branch}-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-
-      - name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY_IMAGE }}
-          tags: |
-            # PR 构建使用特殊的 tag
-            type=raw,value=${{ env.PR_TAG_PREFIX }}${{ steps.pr_meta.outputs.pr_tag }},enable=${{ github.event_name == 'pull_request' }}
-            # 上游release触发构建
-            type=raw,value=${{ needs.prepare.outputs.release_tag }},enable=${{ github.event_name == 'repository_dispatch' }}
-            # 自己的release或手动构建
-            type=semver,pattern={{version}},enable=${{ github.event_name == 'release' }}
-            type=raw,value=${{ github.event.inputs.release_tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
-            type=raw,value=latest,enable=${{ github.event_name == 'release' }}
-
-      - name: Docker login
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_REGISTRY_USER }}
-          password: ${{ secrets.DOCKER_REGISTRY_PASSWORD }}
-
-      - name: Create manifest list and push
-        working-directory: /tmp/digests
-        run: |
-          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf '${{ env.REGISTRY_IMAGE }}@sha256:%s ' *)
-
-      - name: Inspect image
-        run: |
-          docker buildx imagetools inspect ${{ env.REGISTRY_IMAGE }}:${{ steps.meta.outputs.version }}
-          
-    #   - name: Send notification
-    #     if: always()
-    #     uses: rtCamp/action-slack-notify@v2
-    #     env:
-    #       SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
-    #       SLACK_CHANNEL: ci-notifications
-    #       SLACK_TITLE: Docker Build Result
-    #       SLACK_MESSAGE: "Multi-architecture Docker image built for ${{ needs.prepare.outputs.release_tag }}"
-    #       SLACK_COLOR: ${{ job.status }}
