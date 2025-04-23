@@ -40,7 +40,7 @@ concurrency:
 jobs:
   build-and-publish:
     strategy:
-      fail-fast: false # 一个平台失败不取消其他平台
+      fail-fast: on # 一个平台失败不取消其他平台
       matrix:
         include:
           - platform: linux/amd64
@@ -154,6 +154,8 @@ jobs:
         with:
           username: ${{ secrets.DOCKER_REGISTRY_USER }} # 确保 secrets 可用
           password: ${{ secrets.DOCKER_REGISTRY_PASSWORD }}
+          registry: docker.io
+          
           # registry: ghcr.io # 如果使用 GHCR
 
       - name: Build and push Docker image
@@ -178,64 +180,3 @@ jobs:
             CLERK_WEBHOOK_SECRET=${{ secrets.CLERK_WEBHOOK_SECRET }}
           # 输出类型改为 image，因为我们将合并 manifest
           outputs: type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true
-
-      # 不再需要导出 digest 和上传 artifact，因为 build-push v5 可以直接处理多平台 manifest
-      # 但如果采用 build per platform -> merge manifests 的策略，则需要保留
-
-# --- 如果你想保持官方的分平台构建 -> 合并 Manifest 的模式 ---
-# 你需要修改上面的 build job：
-# 1. `push: false` (只构建不推送)
-# 2. `outputs: type=docker,dest=/tmp/image.tar` (导出镜像到文件) 或 `outputs: type=cacheonly`
-# 3. 添加导出 digest 和上传 artifact 的步骤 (参考你的原始 workflow 或官方示例)
-# 4. 添加下面的 merge job (参考你的原始 workflow 或官方示例)
-
-# --- 保持官方 Merge Job 结构 (如果需要) ---
-  # merge:
-  #   name: Merge Manifests
-  #   needs: build-and-publish # 依赖所有平台的构建完成
-  #   runs-on: ubuntu-latest
-  #   if: success() # 仅当所有构建都成功时运行
-  #   steps:
-  #     - name: Harden Runner
-  #       uses: step-security/harden-runner@0d381219ddf674d61a7572ddd194795e796143df # v2.9.0
-  #       with:
-  #         egress-policy: audit
-
-  #     - name: Download digests
-  #       uses: actions/download-artifact@v4
-  #       with:
-  #         path: /tmp/digests
-  #         pattern: digest-* # 确保 build job 上传的 artifact 名称匹配
-  #         merge-multiple: true
-
-  #     - name: Set up Docker Buildx
-  #       uses: docker/setup-buildx-action@v3
-
-  #     - name: Docker meta tags (for manifest)
-  #       id: meta # 需要重新获取 tags
-  #       uses: docker/metadata-action@v5
-  #       with:
-  #         images: ${{ env.REGISTRY_IMAGE }}
-  #         tags: |
-  #           type=raw,value=${{ needs.build-and-publish.outputs.release_tag }} # 如何从 build job 获取 release_tag? 需要在 build job 输出它
-  #           # Add other tags as needed (e.g., latest)
-
-  #     - name: Login to Docker Registry
-  #       uses: docker/login-action@v3
-  #       with:
-  #         username: ${{ secrets.DOCKER_REGISTRY_USER }}
-  #         password: ${{ secrets.DOCKER_REGISTRY_PASSWORD }}
-
-  #     - name: Create manifest list and push
-  #       working-directory: /tmp/digests
-  #       run: |
-  #         # 确保 DOCKER_METADATA_OUTPUT_JSON 环境变量包含正确的 tags
-  #         # 这通常由 docker/metadata-action 输出，但需要在 merge job 中重新运行或传递
-  #         # 假设 DOCKER_METADATA_OUTPUT_JSON 已设置好 (需要调整)
-  #         docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-  #           $(printf '${{ env.REGISTRY_IMAGE }}@sha256:%s ' *)
-
-  #     - name: Inspect image (Optional)
-  #       run: |
-  #         # 假设 steps.meta.outputs.version 是可用的
-  #         docker buildx imagetools inspect ${{ env.REGISTRY_IMAGE }}:${{ steps.meta.outputs.version }}
