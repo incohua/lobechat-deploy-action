@@ -137,6 +137,7 @@ jobs:
           build-args: |
             SHA=${{ steps.vars.outputs.sha_short }}
             UPSTREAM_VERSION=${{ steps.vars.outputs.release_tag }}
+            NEXT_PUBLIC_ENABLE_NEXT_AUTH="0"
             NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=${{ secrets.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY }}
             CLERK_SECRET_KEY=${{ secrets.CLERK_SECRET_KEY }}
             CLERK_WEBHOOK_SECRET=${{ secrets.CLERK_WEBHOOK_SECRET }}
