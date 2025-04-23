@@ -32,7 +32,7 @@ jobs:
           - platform: linux/amd64
             os: ubuntu-latest
           - platform: linux/arm64
-            os: ubuntu-latest # 使用 QEMU 在标准 runner 上构建 ARM
+            os: ubuntu-24.04-arm
     runs-on: ${{ matrix.os }}
     name: Build ${{ matrix.platform }} Image
     permissions:
