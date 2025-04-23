@@ -113,7 +113,7 @@ jobs:
           echo "Applying custom modifications..."
           # 复制 custom 文件夹内容到构建上下文，覆盖同名文件
           # 使用 rsync 更安全，可以处理不存在的目录
-          rsync -a ../workflow-repo/custom/ ./ --exclude '.gitkeep' # 假设你的自定义文件在 workflow 仓库的 custom/ 目录下
+          rsync -a ../custom/ ./ --exclude '.gitkeep' # 假设你的自定义文件在 workflow 仓库的 custom/ 目录下
           # 或者用 find/cp
           # find ../workflow-repo/custom -mindepth 1 -maxdepth 1 -exec cp -r {} ./ \;
 
