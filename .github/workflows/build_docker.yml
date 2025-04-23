@@ -93,32 +93,45 @@ jobs:
       - name: Prepare Build Context
         id: prepare_context
         run: |
-          BUILD_CONTEXT_DIR="build-context-${{ matrix.platform }}" # 每个平台用独立目录避免冲突
+          # 替换斜杠为连字符以避免路径问题
+          PLATFORM_NAME="${{ matrix.platform }}"
+          SAFE_PLATFORM_NAME="${PLATFORM_NAME//\//-}"  # 将 linux/amd64 替换为 linux-amd64
+          BUILD_CONTEXT_DIR="build-context-${SAFE_PLATFORM_NAME}"
           RELEASE_TAG="${{ steps.vars.outputs.release_tag }}"
           SOURCE_ARCHIVE="lobe-chat-source-$RELEASE_TAG.tar.gz"
-
+          
+          # 获取工作目录的绝对路径
+          WORKSPACE_DIR="${GITHUB_WORKSPACE}"
+          CUSTOM_DIR="${WORKSPACE_DIR}/workflow-repo/custom"
+          
           echo "Creating build context directory: $BUILD_CONTEXT_DIR"
           mkdir -p "$BUILD_CONTEXT_DIR"
           cd "$BUILD_CONTEXT_DIR"
-
-          echo "Downloading upstream source for tag v$RELEASE_TAG..." # Lobe-Chat release tags 有 'v' 前缀
-          # 注意：检查 Lobe-Chat 的 tag 格式，如果 API 返回不带 v，这里可能不需要加
+          
+          echo "Downloading upstream source for tag v$RELEASE_TAG..."
           curl -sL "https://github.com/${{ env.UPSTREAM_REPO_OWNER }}/${{ env.UPSTREAM_REPO_NAME }}/archive/refs/tags/v$RELEASE_TAG.tar.gz" -o "$SOURCE_ARCHIVE"
-
+          
           echo "Extracting source code..."
-          # 解压并移除顶层目录 (通常是 reponame-tagname/)
           tar -xzf "$SOURCE_ARCHIVE" --strip-components=1
           rm "$SOURCE_ARCHIVE"
-
+          
           echo "Applying custom modifications..."
-          # 复制 custom 文件夹内容到构建上下文，覆盖同名文件
-          # 使用 rsync 更安全，可以处理不存在的目录
-          rsync -a ../workflow-repo/custom/ ./ --exclude '.gitkeep'
-          # 或者用 find/cp
-          # find ../workflow-repo/custom -mindepth 1 -maxdepth 1 -exec cp -r {} ./ \;
-
+          echo "Custom directory: ${CUSTOM_DIR}"
+          # 使用绝对路径指向 custom 目录
+          if [ -d "${CUSTOM_DIR}" ]; then
+            rsync -av "${CUSTOM_DIR}/" ./ --exclude '.gitkeep'
+            echo "Custom files copied successfully"
+          else
+            echo "Warning: Custom directory not found at ${CUSTOM_DIR}"
+            # 列出工作目录结构以帮助调试
+            echo "Workspace structure:"
+            ls -la "${WORKSPACE_DIR}"
+            echo "Workflow repo structure:"
+            ls -la "${WORKSPACE_DIR}/workflow-repo"
+          fi
+          
           echo "Build context prepared in $PWD"
-          cd .. # 返回上一级目录
+          cd "${WORKSPACE_DIR}" # 返回工作目录
           echo "context_path=$BUILD_CONTEXT_DIR" >> $GITHUB_OUTPUT
 
       - name: Docker meta tags
