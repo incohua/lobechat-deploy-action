@@ -92,6 +92,6 @@ jobs:
             });
             console.log('Workflow dispatch initiated.');
             core.setOutput('triggered', 'true');
-    outputs:
-      triggered: ${{ steps.trigger.outputs.triggered }}
-      release_tag: ${{ steps.check_release.outputs.release_tag }} # 传递版本号，即使未触发也可能有用
+    # outputs:
+    #   triggered: ${{ steps.trigger.outputs.triggered }}
+    #   release_tag: ${{ steps.check_release.outputs.release_tag }} # 传递版本号，即使未触发也可能有用
