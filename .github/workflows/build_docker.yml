@@ -4,7 +4,7 @@ on:
   workflow_dispatch: # 允许手动触发构建特定版本
     inputs:
       release_tag:
-        description: 'Upstream lobehub/lobechat release tag to build'
+        description: 'Upstream lobehub/lobe-chat release tag to build'
         required: true
         default: 'latest' # 注意：'latest' 可能需要特殊处理，最好是具体版本号
   workflow_call: # 由 monitor-upstream.yml 触发
@@ -30,7 +30,7 @@ env:
   # 定义环境变量，如果不用 workflow_call 的 secrets 传递，则定义在这里
   REGISTRY_IMAGE: ${{ secrets.DOCKER_REGISTRY_USER }}/lobe-chat-clerk # 确保 secrets.DOCKER_REGISTRY_USER 可用
   UPSTREAM_REPO_OWNER: "lobehub"
-  UPSTREAM_REPO_NAME: "lobechat"
+  UPSTREAM_REPO_NAME: "lobe-chat"
   # BUILD_CONTEXT_DIR: "build-context" # 构建上下文目录名
 
 concurrency:
@@ -95,14 +95,14 @@ jobs:
         run: |
           BUILD_CONTEXT_DIR="build-context-${{ matrix.platform }}" # 每个平台用独立目录避免冲突
           RELEASE_TAG="${{ steps.vars.outputs.release_tag }}"
-          SOURCE_ARCHIVE="lobechat-source-$RELEASE_TAG.tar.gz"
+          SOURCE_ARCHIVE="lobe-chat-source-$RELEASE_TAG.tar.gz"
 
           echo "Creating build context directory: $BUILD_CONTEXT_DIR"
           mkdir -p "$BUILD_CONTEXT_DIR"
           cd "$BUILD_CONTEXT_DIR"
 
-          echo "Downloading upstream source for tag v$RELEASE_TAG..." # LobeChat release tags 有 'v' 前缀
-          # 注意：检查 LobeChat 的 tag 格式，如果 API 返回不带 v，这里可能不需要加
+          echo "Downloading upstream source for tag v$RELEASE_TAG..." # Lobe-Chat release tags 有 'v' 前缀
+          # 注意：检查 Lobe-Chat 的 tag 格式，如果 API 返回不带 v，这里可能不需要加
           curl -sL "https://github.com/${{ env.UPSTREAM_REPO_OWNER }}/${{ env.UPSTREAM_REPO_NAME }}/archive/refs/tags/v$RELEASE_TAG.tar.gz" -o "$SOURCE_ARCHIVE"
 
           echo "Extracting source code..."
