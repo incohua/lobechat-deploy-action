@@ -4,7 +4,7 @@ on:
   workflow_dispatch: # 允许手动触发构建特定版本
     inputs:
       release_tag:
-        description: 'Upstream lobehub/lobechat release tag to build (e.g., 0.150.0)'
+        description: 'Upstream lobehub/lobechat release tag to build'
         required: true
         default: 'latest' # 注意：'latest' 可能需要特殊处理，最好是具体版本号
   workflow_call: # 由 monitor-upstream.yml 触发

@@ -84,7 +84,7 @@ jobs:
             await github.rest.actions.createWorkflowDispatch({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              workflow_id: 'build-docker.yml', // *** 确保这是你的构建 Workflow 文件名 ***
+              workflow_id: 'build_docker.yml', // *** 确保这是你的构建 Workflow 文件名 ***
               ref: context.ref, // 或者指定主分支 'refs/heads/main'
               inputs: {
                 release_tag: '${{ steps.check_release.outputs.release_tag }}'
