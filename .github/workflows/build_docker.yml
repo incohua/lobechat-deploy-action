@@ -1,4 +1,4 @@
-name: Build Custom LobeChat Image
+name: Build_Docker_Image
 
 on:
   workflow_dispatch: # 允许手动触发构建特定版本
@@ -57,7 +57,7 @@ jobs:
 
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@0d381219ddf674d61a7572ddd194795e796143df # v2.9.0
+        uses: step-security/step-security/harden-runner@v2 # v2.9.0
         with:
           egress-policy: audit
 

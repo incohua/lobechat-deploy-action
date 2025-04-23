@@ -1,4 +1,4 @@
-name: Monitor Upstream Releases and Trigger Build
+name: Check_Release
 
 on:
   schedule:
