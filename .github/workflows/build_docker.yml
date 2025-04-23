@@ -1,221 +1,228 @@
-name: Build and Publish Docker Image
+name: Build Custom LobeChat Image
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # 允许手动触发构建特定版本
     inputs:
       release_tag:
-        description: '构建的版本标签'
+        description: 'Upstream lobehub/lobechat release tag to build (e.g., 0.150.0)'
         required: true
-        default: 'latest'
-  repository_dispatch:
-    types: [new-upstream-release]
-  release:
-    types: [published]
-  pull_request:
-    types: [synchronize, labeled, unlabeled]
-
-concurrency:
-  group: ${{ github.ref }}-${{ github.workflow }}
-  cancel-in-progress: true
+        default: 'latest' # 注意：'latest' 可能需要特殊处理，最好是具体版本号
+  workflow_call: # 由 monitor-upstream.yml 触发
+    inputs:
+      release_tag:
+        description: 'Upstream release tag from monitor workflow'
+        required: true
+        type: string
+    # 如果需要 secrets，可以在这里定义并传递
+    # secrets:
+    #   DOCKER_REGISTRY_USER:
+    #     required: true
+    #   DOCKER_REGISTRY_PASSWORD:
+    #     required: true
+    #   NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:
+    #     required: false # 根据你的需求设置是否必须
+    #   CLERK_SECRET_KEY:
+    #     required: false
+    #   CLERK_WEBHOOK_SECRET:
+    #     required: false
 
 env:
-  REGISTRY_IMAGE: ${{ secrets.DOCKER_REGISTRY_USER }}/lobe-chat-clerk
-  PR_TAG_PREFIX: pr-build-
-  UPSTREAM_REPO: lobehub/lobe-chat  
+  # 定义环境变量，如果不用 workflow_call 的 secrets 传递，则定义在这里
+  REGISTRY_IMAGE: ${{ secrets.DOCKER_REGISTRY_USER }}/lobe-chat-clerk # 确保 secrets.DOCKER_REGISTRY_USER 可用
+  UPSTREAM_REPO_OWNER: "lobehub"
+  UPSTREAM_REPO_NAME: "lobechat"
+  # BUILD_CONTEXT_DIR: "build-context" # 构建上下文目录名
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event.inputs.release_tag || github.sha }}
+  cancel-in-progress: true
 
 jobs:
-  prepare:
-    runs-on: ubuntu-latest
-    if: |
-      (github.event_name == 'pull_request' &&
-       contains(github.event.pull_request.labels.*.name, 'Build Docker')) ||
-      github.event_name != 'pull_request'
-    outputs:
-      release_tag: ${{ steps.set_vars.outputs.release_tag }}
-      build_context: ${{ steps.set_vars.outputs.build_context }}
-    
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      
-      - name: Set variables
-        id: set_vars
-        run: |
-          # 根据触发事件类型确定版本标签
-          if [ "${{ github.event_name }}" == "repository_dispatch" ]; then
-            # 从上游监控触发
-            RELEASE_TAG="${{ github.event.client_payload.release_tag }}"
-            BUILD_CONTEXT="upstream"
-          elif [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            # 手动触发
-            RELEASE_TAG="${{ github.event.inputs.release_tag }}"
-            BUILD_CONTEXT="upstream"
-          elif [ "${{ github.event_name }}" == "release" ]; then
-            # 从release触发
-            RELEASE_TAG="${{ github.ref_name }}"
-            BUILD_CONTEXT="local"
-          elif [ "${{ github.event_name }}" == "pull_request" ]; then
-            # 从PR触发
-            RELEASE_TAG="pr-${{ github.event.pull_request.number }}"
-            BUILD_CONTEXT="local"
-          else
-            RELEASE_TAG="latest"
-            BUILD_CONTEXT="local"
-          fi
-          
-          echo "release_tag=$RELEASE_TAG" >> $GITHUB_OUTPUT
-          echo "build_context=$BUILD_CONTEXT" >> $GITHUB_OUTPUT
-          echo "使用版本标签: $RELEASE_TAG"
-          echo "构建上下文: $BUILD_CONTEXT"
-
-  build:
-    needs: prepare
+  build-and-publish:
     strategy:
+      fail-fast: false # 一个平台失败不取消其他平台
       matrix:
         include:
           - platform: linux/amd64
             os: ubuntu-latest
           - platform: linux/arm64
-            os: ubuntu-24.04-arm
+            # 注意: GitHub 托管的 ARM runner 可能需要特定标签，或使用自托管 runner
+            # os: ubuntu-24.04-arm # 确认 Runner 标签可用性
+            os: ubuntu-latest # 如果 ARM runner 不稳定或不可用，可暂时都在 ubuntu-latest 上用 QEMU 构建
     runs-on: ${{ matrix.os }}
     name: Build ${{ matrix.platform }} Image
-    steps:
-      - name: Prepare
-        run: |
-          platform=${{ matrix.platform }}
-          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
+    permissions:
+      contents: read # 读取仓库中的 custom/ 目录
+      packages: write # 推送 Docker 镜像
 
-      - name: Checkout base repository
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@0d381219ddf674d61a7572ddd194795e796143df # v2.9.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout Workflow Repository (for custom files)
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-      
-      # 如果是上游构建，下载上游仓库的release源码
-      - name: Download upstream release source
-        if: needs.prepare.outputs.build_context == 'upstream'
+          path: workflow-repo # 将本仓库代码 checkout 到独立目录
+
+      - name: Validate Release Tag Input
+        id: vars
         run: |
-          mkdir -p upstream-temp
-          cd upstream-temp
-          
-          RELEASE_TAG="${{ needs.prepare.outputs.release_tag }}"
-          REPO_PARTS=(${UPSTREAM_REPO//\// })
-          OWNER=${REPO_PARTS[0]}
-          REPO=${REPO_PARTS[1]}
-          
-          echo "下载 $OWNER/$REPO 的源码，版本: $RELEASE_TAG"
-          
-          # 下载源代码压缩包
-          curl -L "https://github.com/$OWNER/$REPO/archive/refs/tags/$RELEASE_TAG.tar.gz" -o source.tar.gz
-          
-          # 解压源代码
-          tar -xzf source.tar.gz --strip-components=1
-          rm source.tar.gz
-          
-          echo "上游代码下载完成，版本: $RELEASE_TAG"
-          ls -la
-      
-      # 准备构建上下文
-      - name: Prepare build context
-        run: |
-          mkdir -p build-context
-          
-          if [ "${{ needs.prepare.outputs.build_context }}" == "upstream" ]; then
-            echo "基于上游仓库构建"
-            # 复制上游仓库内容
-            cp -r upstream-temp/* build-context/
-            
-           # 应用自定义修改
-           echo "应用自定义修改..."
-           
-           # 检查并替换 Dockerfile.database
-           if [ -f "custom/Dockerfile.database" ]; then
-             echo "替换 Dockerfile.database"
-             cp custom/Dockerfile.database build-context/
-           fi
-           
-           # 应用其他自定义文件
-           if [ -d "custom" ]; then
-             echo "应用其他自定义文件"
-             find custom -type f -not -name "Dockerfile.database" | while read file; do
-               target_file=${file#custom/}
-               target_dir=$(dirname "build-context/$target_file")
-               mkdir -p "$target_dir"
-               cp "$file" "build-context/$target_file"
-               echo "应用: $target_file"
-             done
-           fi
-          else
-            echo "基于本地仓库构建"
-            # 直接使用本地仓库的内容
-            cp -r ./* build-context/
+          TAG="${{ inputs.release_tag }}"
+          # 简单验证，确保 tag 不为空
+          if [ -z "$TAG" ]; then
+            echo "Error: Release tag input is empty."
+            exit 1
           fi
+          # 可以添加更复杂的验证，例如检查格式
+          echo "Building for upstream tag: $TAG"
+          # 获取当前 Git SHA 用于可能的调试标签
+          echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "release_tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Set up QEMU (needed if building ARM on AMD64 host)
+        if: runner.os == 'Linux' && matrix.platform != 'linux/amd64' # 仅在需要跨平台模拟时设置
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+        # with:
+        #   driver-opts: image=moby/buildkit:v0.13.0 # 可选：指定 buildkit 版本
 
-      # 为 PR 生成特殊的 tag
-      - name: Generate PR metadata
-        if: github.event_name == 'pull_request'
-        id: pr_meta
+      - name: Prepare Build Context
+        id: prepare_context
         run: |
-          branch_name="${{ github.head_ref }}"
-          sanitized_branch=$(echo "${branch_name}" | sed -E 's/[^a-zA-Z0-9_.-]+/-/g')
-          echo "pr_tag=${sanitized_branch}-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          BUILD_CONTEXT_DIR="build-context-${{ matrix.platform }}" # 每个平台用独立目录避免冲突
+          RELEASE_TAG="${{ steps.vars.outputs.release_tag }}"
+          SOURCE_ARCHIVE="lobechat-source-$RELEASE_TAG.tar.gz"
 
-      - name: Docker meta
+          echo "Creating build context directory: $BUILD_CONTEXT_DIR"
+          mkdir -p "$BUILD_CONTEXT_DIR"
+          cd "$BUILD_CONTEXT_DIR"
+
+          echo "Downloading upstream source for tag v$RELEASE_TAG..." # LobeChat release tags 有 'v' 前缀
+          # 注意：检查 LobeChat 的 tag 格式，如果 API 返回不带 v，这里可能不需要加
+          curl -sL "https://github.com/${{ env.UPSTREAM_REPO_OWNER }}/${{ env.UPSTREAM_REPO_NAME }}/archive/refs/tags/v$RELEASE_TAG.tar.gz" -o "$SOURCE_ARCHIVE"
+
+          echo "Extracting source code..."
+          # 解压并移除顶层目录 (通常是 reponame-tagname/)
+          tar -xzf "$SOURCE_ARCHIVE" --strip-components=1
+          rm "$SOURCE_ARCHIVE"
+
+          echo "Applying custom modifications..."
+          # 复制 custom 文件夹内容到构建上下文，覆盖同名文件
+          # 使用 rsync 更安全，可以处理不存在的目录
+          rsync -a ../workflow-repo/custom/ ./ --exclude '.gitkeep' # 假设你的自定义文件在 workflow 仓库的 custom/ 目录下
+          # 或者用 find/cp
+          # find ../workflow-repo/custom -mindepth 1 -maxdepth 1 -exec cp -r {} ./ \;
+
+          echo "Build context prepared in $PWD"
+          cd .. # 返回上一级目录
+          echo "context_path=$BUILD_CONTEXT_DIR" >> $GITHUB_OUTPUT
+
+      - name: Docker meta tags
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY_IMAGE }}
           tags: |
-            # PR 构建使用特殊的 tag
-            type=raw,value=${{ env.PR_TAG_PREFIX }}${{ steps.pr_meta.outputs.pr_tag }},enable=${{ github.event_name == 'pull_request' }}
-            # 上游release触发构建
-            type=raw,value=${{ needs.prepare.outputs.release_tag }},enable=${{ github.event_name == 'repository_dispatch' }}
-            # 自己的release或手动构建
-            type=semver,pattern={{version}},enable=${{ github.event_name == 'release' }}
-            type=raw,value=${{ github.event.inputs.release_tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
-            type=raw,value=latest,enable=${{ github.event_name == 'release' }}
+            # 主要标签：上游版本号
+            type=raw,value=${{ steps.vars.outputs.release_tag }}
+            # 可选：如果这是最新的上游版本，也标记为 latest (需要 monitor workflow 传递是否最新的信息，或者在这里再次查询)
+            # type=raw,value=latest,enable={{trigger_type == 'schedule' and is_latest == 'true'}} # 这需要更复杂的逻辑
+            # 为手动触发添加标签（如果需要区分）
+            type=raw,value=${{ steps.vars.outputs.release_tag }}-manual,enable=${{ github.event_name == 'workflow_dispatch' }}
+            # 可以添加基于 Git SHA 的调试标签
+            type=sha,prefix=${{ steps.vars.outputs.release_tag }}-,suffix=-${{ matrix.platform }},format=short,enable=true
 
-      - name: Docker login
+      - name: Login to Docker Registry
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKER_REGISTRY_USER }}
+          username: ${{ secrets.DOCKER_REGISTRY_USER }} # 确保 secrets 可用
           password: ${{ secrets.DOCKER_REGISTRY_PASSWORD }}
+          # registry: ghcr.io # 如果使用 GHCR
 
-      - name: Get commit SHA
-        id: vars
-        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-
-      - name: Build and export
+      - name: Build and push Docker image
         id: build
         uses: docker/build-push-action@v5
         with:
+          context: ${{ steps.prepare_context.outputs.context_path }}
+          # 指定被替换后的 Dockerfile 路径
+          file: ${{ steps.prepare_context.outputs.context_path }}/Dockerfile.database
           platforms: ${{ matrix.platform }}
-          context: ./build-context
-          file: ./build-context/Dockerfile.database
+          push: true # 直接构建并推送单平台镜像
+          tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           build-args: |
             SHA=${{ steps.vars.outputs.sha_short }}
-            UPSTREAM_VERSION=${{ needs.prepare.outputs.release_tag }}
+            UPSTREAM_VERSION=${{ steps.vars.outputs.release_tag }}
+            # 传递你的 secrets 作为 build args
             NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=${{ secrets.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY }}
             CLERK_SECRET_KEY=${{ secrets.CLERK_SECRET_KEY }}
             CLERK_WEBHOOK_SECRET=${{ secrets.CLERK_WEBHOOK_SECRET }}
-          outputs: type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          # 输出类型改为 image，因为我们将合并 manifest
+          outputs: type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true
 
-      - name: Export digest
-        run: |
-          rm -rf /tmp/digests
-          mkdir -p /tmp/digests
-          digest="${{ steps.build.outputs.digest }}"
-          touch "/tmp/digests/${digest#sha256:}"
+      # 不再需要导出 digest 和上传 artifact，因为 build-push v5 可以直接处理多平台 manifest
+      # 但如果采用 build per platform -> merge manifests 的策略，则需要保留
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: digest-${{ env.PLATFORM_PAIR }}
-          path: /tmp/digests/*
-          if-no-files-found: error
-          retention-days: 1
+# --- 如果你想保持官方的分平台构建 -> 合并 Manifest 的模式 ---
+# 你需要修改上面的 build job：
+# 1. `push: false` (只构建不推送)
+# 2. `outputs: type=docker,dest=/tmp/image.tar` (导出镜像到文件) 或 `outputs: type=cacheonly`
+# 3. 添加导出 digest 和上传 artifact 的步骤 (参考你的原始 workflow 或官方示例)
+# 4. 添加下面的 merge job (参考你的原始 workflow 或官方示例)
+
+# --- 保持官方 Merge Job 结构 (如果需要) ---
+  # merge:
+  #   name: Merge Manifests
+  #   needs: build-and-publish # 依赖所有平台的构建完成
+  #   runs-on: ubuntu-latest
+  #   if: success() # 仅当所有构建都成功时运行
+  #   steps:
+  #     - name: Harden Runner
+  #       uses: step-security/harden-runner@0d381219ddf674d61a7572ddd194795e796143df # v2.9.0
+  #       with:
+  #         egress-policy: audit
+
+  #     - name: Download digests
+  #       uses: actions/download-artifact@v4
+  #       with:
+  #         path: /tmp/digests
+  #         pattern: digest-* # 确保 build job 上传的 artifact 名称匹配
+  #         merge-multiple: true
+
+  #     - name: Set up Docker Buildx
+  #       uses: docker/setup-buildx-action@v3
+
+  #     - name: Docker meta tags (for manifest)
+  #       id: meta # 需要重新获取 tags
+  #       uses: docker/metadata-action@v5
+  #       with:
+  #         images: ${{ env.REGISTRY_IMAGE }}
+  #         tags: |
+  #           type=raw,value=${{ needs.build-and-publish.outputs.release_tag }} # 如何从 build job 获取 release_tag? 需要在 build job 输出它
+  #           # Add other tags as needed (e.g., latest)
+
+  #     - name: Login to Docker Registry
+  #       uses: docker/login-action@v3
+  #       with:
+  #         username: ${{ secrets.DOCKER_REGISTRY_USER }}
+  #         password: ${{ secrets.DOCKER_REGISTRY_PASSWORD }}
+
+  #     - name: Create manifest list and push
+  #       working-directory: /tmp/digests
+  #       run: |
+  #         # 确保 DOCKER_METADATA_OUTPUT_JSON 环境变量包含正确的 tags
+  #         # 这通常由 docker/metadata-action 输出，但需要在 merge job 中重新运行或传递
+  #         # 假设 DOCKER_METADATA_OUTPUT_JSON 已设置好 (需要调整)
+  #         docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+  #           $(printf '${{ env.REGISTRY_IMAGE }}@sha256:%s ' *)
+
+  #     - name: Inspect image (Optional)
+  #       run: |
+  #         # 假设 steps.meta.outputs.version 是可用的
+  #         docker buildx imagetools inspect ${{ env.REGISTRY_IMAGE }}:${{ steps.meta.outputs.version }}

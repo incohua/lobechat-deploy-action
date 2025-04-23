@@ -1,68 +1,97 @@
-name: Monitor Upstream Releases
+name: Monitor Upstream Releases and Trigger Build
 
 on:
   schedule:
-    - cron: "0 */6 * * *"
-  workflow_dispatch:
+    - cron: "0 */6 * * *" # 每 6 小时检查一次
+  workflow_dispatch: # 允许手动触发检查
 
-# 添加权限配置
 permissions:
-  contents: write
-  actions: write
+  contents: read # 读取仓库内容（如果需要检查本地记录，但我们将避免）
+  actions: write # 需要触发 workflow_call
+  packages: read # 需要读取 Docker 镜像信息
 
 jobs:
-  check-upstream:
+  check-and-trigger:
     runs-on: ubuntu-latest
     outputs:
-      new_release: ${{ steps.check.outputs.new_release }}
-      release_tag: ${{ steps.check.outputs.release_tag }}
+      triggered: ${{ steps.trigger.outputs.triggered }}
+      release_tag: ${{ steps.check_release.outputs.release_tag }}
 
     steps:
-      - name: Checkout repository
+      - name: Harden Runner
+        uses: step-security/harden-runner@0d381219ddf674d61a7572ddd194795e796143df # v2.9.0
+        with:
+          egress-policy: audit # TODO: change to 'egress-policy: block' after couple of runs
+
+      - name: Checkout repository (Optional, only if custom files are needed here)
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Get latest upstream release
-        id: check
+      - name: Get latest upstream release tag
+        id: check_release
         run: |
-          REPO_OWNER="lobehub"
-          REPO_NAME="lobechat"
+          UPSTREAM_REPO="lobehub/lobe-chat"
+          echo "Checking latest release for $UPSTREAM_REPO"
+          LATEST_RELEASE_INFO=$(curl -s -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/$UPSTREAM_REPO/releases/latest")
 
-          # 获取最新release信息
-          LATEST_RELEASE=$(curl -s "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases/latest")
-          LATEST_TAG=$(echo $LATEST_RELEASE | jq -r '.tag_name')
+          LATEST_TAG=$(echo "$LATEST_RELEASE_INFO" | jq -r '.tag_name')
 
-          echo "Latest upstream release: $LATEST_TAG"
-
-          # 检查我们是否已经处理过这个release
-          if [ -f "last_processed_release.txt" ]; then
-            LAST_PROCESSED=$(cat last_processed_release.txt)
-          else
-            LAST_PROCESSED=""
+          if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" == "null" ]; then
+            echo "Error: Could not fetch latest release tag from $UPSTREAM_REPO."
+            exit 1
           fi
 
-          if [ "$LATEST_TAG" != "$LAST_PROCESSED" ]; then
-            echo "发现新版本: $LATEST_TAG (之前版本: $LAST_PROCESSED)"
-            echo "new_release=true" >> $GITHUB_OUTPUT
-            echo "release_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
-            echo "$LATEST_TAG" > last_processed_release.txt
-            git config --global user.name "GitHub Actions Bot"
-            git config --global user.email "actions@github.com"
-            git add last_processed_release.txt
-            git commit -m "Update last processed release to $LATEST_TAG"
-            git push
-          else
-            echo "没有新版本，最新版本仍为: $LAST_PROCESSED"
-            echo "new_release=false" >> $GITHUB_OUTPUT
-          fi
+          # 移除 'v' 前缀（如果存在），以保持一致性
+          LATEST_TAG=${LATEST_TAG#v}
 
-      - name: Trigger build workflow
-        if: steps.check.outputs.new_release == 'true'
-        uses: peter-evans/repository-dispatch@v2
+          echo "Latest upstream release tag: $LATEST_TAG"
+          echo "release_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+
+      - name: Login to Docker Registry
+        uses: docker/login-action@v3
         with:
-          # 注意：对于repository-dispatch操作，我们需要使用PAT而不是GITHUB_TOKEN
-          token: ${{ secrets.REPO_ACCESS_TOKEN }}
-          event-type: new-upstream-release
-          client-payload: '{"release_tag": "${{ steps.check.outputs.release_tag }}"}'
+          username: ${{ secrets.DOCKER_REGISTRY_USER }}
+          password: ${{ secrets.DOCKER_REGISTRY_PASSWORD }}
+          # 如果是 GHCR，则使用：
+          # registry: ghcr.io
+          # username: ${{ github.actor }}
+          # password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check if image tag already exists in registry
+        id: check_image
+        run: |
+          IMAGE_NAME="${{ secrets.DOCKER_REGISTRY_USER }}/lobe-chat-clerk" # 从 env 移到这里或作为 input
+          TAG_TO_CHECK="${{ steps.check_release.outputs.release_tag }}"
+          echo "Checking for image: $IMAGE_NAME:$TAG_TO_CHECK"
+
+          # docker manifest inspect 会在镜像不存在时返回非 0 退出码
+          if docker manifest inspect "$IMAGE_NAME:$TAG_TO_CHECK" > /dev/null 2>&1; then
+            echo "Image tag $TAG_TO_CHECK already exists. No build needed."
+            echo "build_needed=false" >> $GITHUB_OUTPUT
+          else
+            echo "Image tag $TAG_TO_CHECK does not exist. Build needed."
+            echo "build_needed=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Trigger Build Workflow
+        id: trigger
+        if: steps.check_image.outputs.build_needed == 'true'
+        uses: actions/github-script@v7 # 改用 github-script 调用 workflow_call
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }} # workflow_call 需要 GITHUB_TOKEN
+          script: |
+            console.log('Triggering build workflow for tag: ${{ steps.check_release.outputs.release_tag }}');
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'build-docker.yml', // *** 确保这是你的构建 Workflow 文件名 ***
+              ref: context.ref, // 或者指定主分支 'refs/heads/main'
+              inputs: {
+                release_tag: '${{ steps.check_release.outputs.release_tag }}'
+              }
+            });
+            console.log('Workflow dispatch initiated.');
+            core.setOutput('triggered', 'true');
+    outputs:
+      triggered: ${{ steps.trigger.outputs.triggered }}
+      release_tag: ${{ steps.check_release.outputs.release_tag }} # 传递版本号，即使未触发也可能有用
