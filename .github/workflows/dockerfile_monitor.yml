@@ -78,7 +78,7 @@ jobs:
     - name: Send Bark notification for Dockerfile.database
       if: steps.check_changes.outputs.dockerfile_changed == 'true'
       run: |
-        curl -X "POST" "${{BARK_URL}}" \
+        curl -X "POST" "${{secrets.BARK_URL}}" \
              -H 'Content-Type: application/json; charset=utf-8' \
              -d '{
                "title": "[LobeChat] Dockerfile.database文件发生变化",
@@ -94,7 +94,7 @@ jobs:
     - name: Send Bark notification for workflow file
       if: steps.check_changes.outputs.workflow_changed == 'true'
       run: |
-        curl -X "POST" "${{BARK_URL}}" \
+        curl -X "POST" "${{secrets.BARK_URL}}" \
              -H 'Content-Type: application/json; charset=utf-8' \
              -d '{
                "title": "[LobeChat-Github-Actions] docker-database.yml工作流文件发生变化",
