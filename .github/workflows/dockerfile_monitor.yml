@@ -1,120 +1,119 @@
-name: Monitor LobeChat Database Dockerfile
+name: Monitor LobeChat Construct Files
 
 on:
   schedule:
-    - cron: '0 * * * *'
-  workflow_dispatch:
-
-env:
-  REPO_OWNER: lobehub
-  REPO_NAME: lobe-chat
-  TARGET_FILE: dockerfile.database
+    - cron: '* 6  * * *' 
+  workflow_dispatch: 
 
 jobs:
-  monitor:
+  notify-changes:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout current repo
+    - name: Checkout current repository
       uses: actions/checkout@v4
-      
-    - name: Setup monitoring cache
+    
+    - name: Check remote repository changes
+      id: check_changes
+      run: |
+        # 克隆远端仓库
+        git clone https://github.com/lobehub/lobe-chat.git remote-repo
+        cd remote-repo
+        
+        # 获取当前提交SHA
+        CURRENT_SHA=$(git rev-parse HEAD)
+        
+        # 检查本地是否存储了上次的SHA
+        cd ..
+        LAST_SHA=""
+        if [ -f last_sha.txt ]; then
+          LAST_SHA=$(cat last_sha.txt)
+        fi
+        
+        echo "Last SHA: $LAST_SHA"
+        echo "Current SHA: $CURRENT_SHA"
+        
+        # 如果SHA不同，检查目标文件是否有变更
+        DOCKERFILE_CHANGED=false
+        WORKFLOW_CHANGED=false
+        COMMIT_MESSAGE=""
+        
+        if [ "$LAST_SHA" != "$CURRENT_SHA" ] && [ -n "$LAST_SHA" ]; then
+          cd remote-repo
+          
+          # 获取变更的文件列表
+          CHANGED_FILES=$(git diff --name-only $LAST_SHA HEAD 2>/dev/null || echo "")
+          
+          # 检查是否包含目标文件
+          if echo "$CHANGED_FILES" | grep -q "^Dockerfile.database$"; then
+            DOCKERFILE_CHANGED=true
+          fi
+          
+          if echo "$CHANGED_FILES" | grep -q "^\.github/workflows/docker-database\.yml$"; then
+            WORKFLOW_CHANGED=true
+          fi
+          
+          # 获取提交信息
+          COMMIT_MESSAGE=$(git log -1 --pretty=format:"%s")
+          cd ..
+        fi
+        
+        # 更新SHA记录
+        echo "$CURRENT_SHA" > last_sha.txt
+        
+        # 设置输出变量
+        echo "dockerfile_changed=$DOCKERFILE_CHANGED" >> $GITHUB_OUTPUT
+        echo "workflow_changed=$WORKFLOW_CHANGED" >> $GITHUB_OUTPUT
+        echo "commit_sha=$CURRENT_SHA" >> $GITHUB_OUTPUT
+        echo "commit_message=$COMMIT_MESSAGE" >> $GITHUB_OUTPUT
+    
+    - name: Cache last SHA
       uses: actions/cache@v3
       with:
-        path: .monitor-cache/
-        key: lobechat-monitor-${{ github.run_id }}
+        path: last_sha.txt
+        key: lobehub-last-sha-${{ steps.check_changes.outputs.commit_sha }}
         restore-keys: |
-          lobechat-monitor-
-
-    - name: Initialize monitoring
+          lobehub-last-sha-
+    
+    - name: Send Bark notification for Dockerfile.database
+      if: steps.check_changes.outputs.dockerfile_changed == 'true'
       run: |
-        mkdir -p .monitor-cache
-        
-    - name: Check for changes
-      id: monitor
+        curl -X "POST" "${{BARK_URL}}" \
+             -H 'Content-Type: application/json; charset=utf-8' \
+             -d '{
+               "title": "[LobeChat] Dockerfile.database文件发生变化",
+               "body": "Dockerfile.database文件发生变化\n\n提交信息: ${{ steps.check_changes.outputs.commit_message }}",
+               "badge": 1,
+               "sound": "minuet",
+               "icon": "https://avatars.githubusercontent.com/u/131470832?s=200&v=4",
+               "group": "LobeChat",
+               "level": "active",
+               "url": "https://github.com/lobehub/lobe-chat/blob/${{ steps.check_changes.outputs.commit_sha }}/Dockerfile.database"
+             }'
+    
+    - name: Send Bark notification for workflow file
+      if: steps.check_changes.outputs.workflow_changed == 'true'
       run: |
-        set -e
-        
-        API_URL="https://api.github.com/repos/${{ env.REPO_OWNER }}/${{ env.REPO_NAME }}/commits"
-        echo "Checking commits for ${{ env.TARGET_FILE }}..."
-        
-        RESPONSE=$(curl -s -f "$API_URL?path=${{ env.TARGET_FILE }}&per_page=1" || echo "[]")
-        
-        if [ "$RESPONSE" = "[]" ] || [ -z "$RESPONSE" ]; then
-          echo "No commits found for ${{ env.TARGET_FILE }}"
-          exit 0
-        fi
-        
-        LATEST_COMMIT=$(echo "$RESPONSE" | jq -r '.[0].sha // "unknown"')
-        COMMIT_MESSAGE_RAW=$(echo "$RESPONSE" | jq -r '.[0].commit.message // "No message"')
-        COMMIT_AUTHOR=$(echo "$RESPONSE" | jq -r '.[0].commit.author.name // "Unknown"')
-        COMMIT_DATE=$(echo "$RESPONSE" | jq -r '.[0].commit.author.date // "Unknown"')
-        COMMIT_URL=$(echo "$RESPONSE" | jq -r '.[0].html_url // ""')
-        
-        COMMIT_MESSAGE=$(echo "$COMMIT_MESSAGE_RAW" | tr -d '\n\r' | sed 's/[*]/·/g' | head -c 100)
-        
-        echo "$LATEST_COMMIT" > .monitor-cache/current_commit.txt
-        echo "$COMMIT_MESSAGE" > .monitor-cache/current_message.txt
-        echo "$COMMIT_AUTHOR" > .monitor-cache/current_author.txt
-        echo "$COMMIT_DATE" > .monitor-cache/current_date.txt
-        echo "$COMMIT_URL" > .monitor-cache/current_url.txt
-        
-        echo "Current commit: $LATEST_COMMIT"
-        echo "Message: $COMMIT_MESSAGE"
-        
-        CACHE_FILE=".monitor-cache/last_commit.txt"
-        if [ -f "$CACHE_FILE" ]; then
-          LAST_COMMIT=$(cat "$CACHE_FILE" 2>/dev/null || echo "")
-          if [ "$LATEST_COMMIT" != "$LAST_COMMIT" ] && [ -n "$LAST_COMMIT" ]; then
-            echo "has_changes=true" >> $GITHUB_OUTPUT
-            echo "New changes detected! ($LAST_COMMIT -> $LATEST_COMMIT)"
-          else
-            echo "has_changes=false" >> $GITHUB_OUTPUT
-            echo "No new changes"
-          fi
-        else
-          echo "has_changes=true" >> $GITHUB_OUTPUT
-          echo "First time setup"
-        fi
-        
-        echo "$LATEST_COMMIT" > "$CACHE_FILE"
-
-    - name: Send Bark notification
-      if: steps.monitor.outputs.has_changes == 'true'
-      env:
-        BARK_URL: ${{ secrets.BARK_URL }}
+        curl -X "POST" "${{BARK_URL}}" \
+             -H 'Content-Type: application/json; charset=utf-8' \
+             -d '{
+               "title": "[LobeChat-Github-Actions] docker-database.yml工作流文件发生变化",
+               "body": "docker-database.yml工作流已更新\n\n提交信息: ${{ steps.check_changes.outputs.commit_message }}",
+               "badge": 1,
+               "sound": "minuet",
+               "icon": "https://avatars.githubusercontent.com/u/131470832?s=200&v=4",
+               "group": "LobeChat",
+               "level": "active",
+               "url": "https://github.com/lobehub/lobe-chat/blob/${{ steps.check_changes.outputs.commit_sha }}/.github/workflows/docker-database.yml"
+             }'
+    
+    - name: Summary
       run: |
-        LATEST_COMMIT=$(cat .monitor-cache/current_commit.txt 2>/dev/null || echo "unknown")
-        COMMIT_MESSAGE=$(cat .monitor-cache/current_message.txt 2>/dev/null || echo "No message")
-        COMMIT_AUTHOR=$(cat .monitor-cache/current_author.txt 2>/dev/null || echo "Unknown")
-        COMMIT_DATE=$(cat .monitor-cache/current_date.txt 2>/dev/null || echo "Unknown")
-        COMMIT_URL=$(cat .monitor-cache/current_url.txt 2>/dev/null || echo "")
-        
-        if [ "$COMMIT_DATE" != "Unknown" ]; then
-          FORMATTED_DATE=$(date -d "$COMMIT_DATE" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "$COMMIT_DATE")
+        echo "## 文件变更监控结果" >> $GITHUB_STEP_SUMMARY
+        echo "- Dockerfile.database: ${{ steps.check_changes.outputs.dockerfile_changed }}" >> $GITHUB_STEP_SUMMARY
+        echo "- docker-database.yml: ${{ steps.check_changes.outputs.workflow_changed }}" >> $GITHUB_STEP_SUMMARY
+        if [[ "${{ steps.check_changes.outputs.dockerfile_changed }}" == "true" || "${{ steps.check_changes.outputs.workflow_changed }}" == "true" ]]; then
+          echo "- 📱 Bark通知已发送" >> $GITHUB_STEP_SUMMARY
         else
-          FORMATTED_DATE="Unknown"
-        fi
-        
-        TITLE="LobeChat Database Dockerfile Updated"
-        BODY="Message: ${COMMIT_MESSAGE}\nAuthor: ${COMMIT_AUTHOR}\nDate: ${FORMATTED_DATE}\nCommit: ${LATEST_COMMIT:0:8}"
-        
-        if [ -n "$BARK_URL" ]; then
-          HTTP_CODE=$(curl -w "%{http_code}" -s -o /dev/null -X POST "$BARK_URL" \
-            -d "title=$TITLE" \
-            -d "body=$BODY" \
-            -d "url=$COMMIT_URL" \
-            -d "group=GitHub Monitor")
-          
-          echo "Bark notification sent"
-          echo "HTTP Code: $HTTP_CODE"
-          
-          if [ "$HTTP_CODE" = "200" ]; then
-            echo "Notification sent successfully"
-          else
-            echo "Notification may have failed (HTTP $HTTP_CODE)"
-          fi
-        else
-          echo "BARK_URL not configured"
-          exit 1
+          echo "- ℹ️ 未检测到目标文件变更" >> $GITHUB_STEP_SUMMARY
         fi
