@@ -1,8 +1,8 @@
-name: Monitor Dockerfile_database Changes
+name: Monitor LobeChat Database Dockerfile
 
 on:
   schedule:
-    - cron: '0 * * * *'  # 每小时检查一次
+    - cron: '0 * * * *'
   workflow_dispatch:
 
 env:
@@ -35,54 +35,48 @@ jobs:
       run: |
         set -e
         
-        # 获取目标文件的最新提交
         API_URL="https://api.github.com/repos/${{ env.REPO_OWNER }}/${{ env.REPO_NAME }}/commits"
-        echo "🔍 Checking commits for ${{ env.TARGET_FILE }}..."
+        echo "Checking commits for ${{ env.TARGET_FILE }}..."
         
         RESPONSE=$(curl -s -f "$API_URL?path=${{ env.TARGET_FILE }}&per_page=1" || echo "[]")
         
         if [ "$RESPONSE" = "[]" ] || [ -z "$RESPONSE" ]; then
-          echo "❌ No commits found for ${{ env.TARGET_FILE }}"
+          echo "No commits found for ${{ env.TARGET_FILE }}"
           exit 0
         fi
         
-        # 安全地提取数据，处理特殊字符
         LATEST_COMMIT=$(echo "$RESPONSE" | jq -r '.[0].sha // "unknown"')
         COMMIT_MESSAGE_RAW=$(echo "$RESPONSE" | jq -r '.[0].commit.message // "No message"')
         COMMIT_AUTHOR=$(echo "$RESPONSE" | jq -r '.[0].commit.author.name // "Unknown"')
         COMMIT_DATE=$(echo "$RESPONSE" | jq -r '.[0].commit.author.date // "Unknown"')
         COMMIT_URL=$(echo "$RESPONSE" | jq -r '.[0].html_url // ""')
         
-        # 清理提交消息，移除特殊字符和换行符
         COMMIT_MESSAGE=$(echo "$COMMIT_MESSAGE_RAW" | tr -d '\n\r' | sed 's/[*]/·/g' | head -c 100)
         
-        # 将数据写入文件而不是使用 GITHUB_OUTPUT（避免特殊字符问题）
         echo "$LATEST_COMMIT" > .monitor-cache/current_commit.txt
         echo "$COMMIT_MESSAGE" > .monitor-cache/current_message.txt
         echo "$COMMIT_AUTHOR" > .monitor-cache/current_author.txt
         echo "$COMMIT_DATE" > .monitor-cache/current_date.txt
         echo "$COMMIT_URL" > .monitor-cache/current_url.txt
         
-        echo "📊 Current commit: $LATEST_COMMIT"
-        echo "📝 Message: $COMMIT_MESSAGE"
+        echo "Current commit: $LATEST_COMMIT"
+        echo "Message: $COMMIT_MESSAGE"
         
-        # 检查是否有变更
         CACHE_FILE=".monitor-cache/last_commit.txt"
         if [ -f "$CACHE_FILE" ]; then
           LAST_COMMIT=$(cat "$CACHE_FILE" 2>/dev/null || echo "")
           if [ "$LATEST_COMMIT" != "$LAST_COMMIT" ] && [ -n "$LAST_COMMIT" ]; then
             echo "has_changes=true" >> $GITHUB_OUTPUT
-            echo "✅ New changes detected! ($LAST_COMMIT -> $LATEST_COMMIT)"
+            echo "New changes detected! ($LAST_COMMIT -> $LATEST_COMMIT)"
           else
             echo "has_changes=false" >> $GITHUB_OUTPUT
-            echo "ℹ️  No new changes"
+            echo "No new changes"
           fi
         else
           echo "has_changes=true" >> $GITHUB_OUTPUT
-          echo "🆕 First time setup"
+          echo "First time setup"
         fi
         
-        # 保存当前提交
         echo "$LATEST_COMMIT" > "$CACHE_FILE"
 
     - name: Send Bark notification
@@ -90,65 +84,37 @@ jobs:
       env:
         BARK_URL: ${{ secrets.BARK_URL }}
       run: |
-        # 从文件读取数据（避免特殊字符问题）
         LATEST_COMMIT=$(cat .monitor-cache/current_commit.txt 2>/dev/null || echo "unknown")
         COMMIT_MESSAGE=$(cat .monitor-cache/current_message.txt 2>/dev/null || echo "No message")
         COMMIT_AUTHOR=$(cat .monitor-cache/current_author.txt 2>/dev/null || echo "Unknown")
         COMMIT_DATE=$(cat .monitor-cache/current_date.txt 2>/dev/null || echo "Unknown")
         COMMIT_URL=$(cat .monitor-cache/current_url.txt 2>/dev/null || echo "")
         
-        # 格式化时间
         if [ "$COMMIT_DATE" != "Unknown" ]; then
           FORMATTED_DATE=$(date -d "$COMMIT_DATE" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "$COMMIT_DATE")
         else
           FORMATTED_DATE="Unknown"
         fi
         
-        # 构造 JSON 负载，确保特殊字符被正确转义
-        cat > notification.json <<EOF
-        {
-          "title": "🐳 LobeChat Database Dockerfile 已更新",
-          "body": "📝 ${COMMIT_MESSAGE}\n\n👤 作者: ${COMMIT_AUTHOR}\n📅 时间: ${FORMATTED_DATE}\n🔍 提交: ${LATEST_COMMIT:0:8}\n\n点击查看详情 →",
-          "group": "GitHub监控",
-          "url": "${COMMIT_URL}",
-          "sound": "update",
-          "badge": 1
-        }
-EOF
+        TITLE="LobeChat Database Dockerfile Updated"
+        BODY="Message: ${COMMIT_MESSAGE}\nAuthor: ${COMMIT_AUTHOR}\nDate: ${FORMATTED_DATE}\nCommit: ${LATEST_COMMIT:0:8}"
         
-        # 发送通知
         if [ -n "$BARK_URL" ]; then
-          HTTP_CODE=$(curl -w "%{http_code}" -s -o response.txt -X POST "$BARK_URL" \
-            -H "Content-Type: application/json; charset=utf-8" \
-            -d @notification.json)
+          HTTP_CODE=$(curl -w "%{http_code}" -s -o /dev/null -X POST "$BARK_URL" \
+            -d "title=$TITLE" \
+            -d "body=$BODY" \
+            -d "url=$COMMIT_URL" \
+            -d "group=GitHub Monitor")
           
-          echo "📱 Bark notification sent"
-          echo "📊 HTTP Code: $HTTP_CODE"
+          echo "Bark notification sent"
+          echo "HTTP Code: $HTTP_CODE"
           
-          if [ -f response.txt ]; then
-            echo "📄 Response:"
-            cat response.txt
-          fi
-          
-          # 检查是否发送成功
           if [ "$HTTP_CODE" = "200" ]; then
-            echo "✅ Notification sent successfully"
+            echo "Notification sent successfully"
           else
-            echo "⚠️  Notification may have failed (HTTP $HTTP_CODE)"
+            echo "Notification may have failed (HTTP $HTTP_CODE)"
           fi
         else
-          echo "❌ BARK_URL not configured"
+          echo "BARK_URL not configured"
           exit 1
-        fi
-
-    - name: Cleanup
-      if: always()
-      run: |
-        # 清理临时文件
-        rm -f notification.json response.txt
-        
-        # 显示缓存状态
-        if [ -d .monitor-cache ]; then
-          echo "📁 Cache contents:"
-          ls -la .monitor-cache/ || true
         fi
