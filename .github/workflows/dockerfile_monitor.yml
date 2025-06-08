@@ -1,20 +1,14 @@
-name: Enhanced LobeChat Dockerfile Monitor
+name: Monitor Dockerfile.database Changes
 
 on:
   schedule:
-    - cron: "0 */6 * * *" # 每 6 小时检查一次
+    - cron: '0 * * * *'  # 每小时检查一次
   workflow_dispatch:
-    inputs:
-      force_notify:
-        description: 'Force send notification'
-        required: false
-        default: 'false'
-        type: boolean
 
 env:
   REPO_OWNER: lobehub
   REPO_NAME: lobe-chat
-  TARGET_FILE: Dockerfile.database
+  TARGET_FILE: dockerfile.database
 
 jobs:
   monitor:
@@ -27,8 +21,7 @@ jobs:
     - name: Setup monitoring cache
       uses: actions/cache@v3
       with:
-        path: |
-          .monitor-cache/
+        path: .monitor-cache/
         key: lobechat-monitor-${{ github.run_id }}
         restore-keys: |
           lobechat-monitor-
@@ -40,34 +33,46 @@ jobs:
     - name: Check for changes
       id: monitor
       run: |
+        set -e
+        
         # 获取目标文件的最新提交
         API_URL="https://api.github.com/repos/${{ env.REPO_OWNER }}/${{ env.REPO_NAME }}/commits"
-        RESPONSE=$(curl -s "$API_URL?path=${{ env.TARGET_FILE }}&per_page=1")
+        echo "🔍 Checking commits for ${{ env.TARGET_FILE }}..."
         
-        if [ "$RESPONSE" = "[]" ]; then
-          echo "❌ File not found or no commits"
-          exit 1
+        RESPONSE=$(curl -s -f "$API_URL?path=${{ env.TARGET_FILE }}&per_page=1" || echo "[]")
+        
+        if [ "$RESPONSE" = "[]" ] || [ -z "$RESPONSE" ]; then
+          echo "❌ No commits found for ${{ env.TARGET_FILE }}"
+          exit 0
         fi
         
-        LATEST_COMMIT=$(echo "$RESPONSE" | jq -r '.[0].sha')
-        COMMIT_MESSAGE=$(echo "$RESPONSE" | jq -r '.[0].commit.message')
-        COMMIT_AUTHOR=$(echo "$RESPONSE" | jq -r '.[0].commit.author.name')
-        COMMIT_DATE=$(echo "$RESPONSE" | jq -r '.[0].commit.author.date')
-        COMMIT_URL=$(echo "$RESPONSE" | jq -r '.[0].html_url')
+        # 安全地提取数据，处理特殊字符
+        LATEST_COMMIT=$(echo "$RESPONSE" | jq -r '.[0].sha // "unknown"')
+        COMMIT_MESSAGE_RAW=$(echo "$RESPONSE" | jq -r '.[0].commit.message // "No message"')
+        COMMIT_AUTHOR=$(echo "$RESPONSE" | jq -r '.[0].commit.author.name // "Unknown"')
+        COMMIT_DATE=$(echo "$RESPONSE" | jq -r '.[0].commit.author.date // "Unknown"')
+        COMMIT_URL=$(echo "$RESPONSE" | jq -r '.[0].html_url // ""')
         
-        echo "latest_commit=$LATEST_COMMIT" >> $GITHUB_OUTPUT
-        echo "commit_message=$COMMIT_MESSAGE" >> $GITHUB_OUTPUT
-        echo "commit_author=$COMMIT_AUTHOR" >> $GITHUB_OUTPUT
-        echo "commit_date=$COMMIT_DATE" >> $GITHUB_OUTPUT
-        echo "commit_url=$COMMIT_URL" >> $GITHUB_OUTPUT
+        # 清理提交消息，移除特殊字符和换行符
+        COMMIT_MESSAGE=$(echo "$COMMIT_MESSAGE_RAW" | tr -d '\n\r' | sed 's/[*]/·/g' | head -c 100)
+        
+        # 将数据写入文件而不是使用 GITHUB_OUTPUT（避免特殊字符问题）
+        echo "$LATEST_COMMIT" > .monitor-cache/current_commit.txt
+        echo "$COMMIT_MESSAGE" > .monitor-cache/current_message.txt
+        echo "$COMMIT_AUTHOR" > .monitor-cache/current_author.txt
+        echo "$COMMIT_DATE" > .monitor-cache/current_date.txt
+        echo "$COMMIT_URL" > .monitor-cache/current_url.txt
+        
+        echo "📊 Current commit: $LATEST_COMMIT"
+        echo "📝 Message: $COMMIT_MESSAGE"
         
         # 检查是否有变更
         CACHE_FILE=".monitor-cache/last_commit.txt"
         if [ -f "$CACHE_FILE" ]; then
-          LAST_COMMIT=$(cat "$CACHE_FILE")
-          if [ "$LATEST_COMMIT" != "$LAST_COMMIT" ]; then
+          LAST_COMMIT=$(cat "$CACHE_FILE" 2>/dev/null || echo "")
+          if [ "$LATEST_COMMIT" != "$LAST_COMMIT" ] && [ -n "$LAST_COMMIT" ]; then
             echo "has_changes=true" >> $GITHUB_OUTPUT
-            echo "✅ New changes detected!"
+            echo "✅ New changes detected! ($LAST_COMMIT -> $LATEST_COMMIT)"
           else
             echo "has_changes=false" >> $GITHUB_OUTPUT
             echo "ℹ️  No new changes"
@@ -77,37 +82,73 @@ jobs:
           echo "🆕 First time setup"
         fi
         
-        # 保存当前提交以供下次比较
+        # 保存当前提交
         echo "$LATEST_COMMIT" > "$CACHE_FILE"
 
     - name: Send Bark notification
-      if: steps.monitor.outputs.has_changes == 'true' || github.event.inputs.force_notify == 'true'
+      if: steps.monitor.outputs.has_changes == 'true'
       env:
         BARK_URL: ${{ secrets.BARK_URL }}
       run: |
-        # 格式化时间
-        FORMATTED_DATE=$(date -d "${{ steps.monitor.outputs.commit_date }}" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "${{ steps.monitor.outputs.commit_date }}")
+        # 从文件读取数据（避免特殊字符问题）
+        LATEST_COMMIT=$(cat .monitor-cache/current_commit.txt 2>/dev/null || echo "unknown")
+        COMMIT_MESSAGE=$(cat .monitor-cache/current_message.txt 2>/dev/null || echo "No message")
+        COMMIT_AUTHOR=$(cat .monitor-cache/current_author.txt 2>/dev/null || echo "Unknown")
+        COMMIT_DATE=$(cat .monitor-cache/current_date.txt 2>/dev/null || echo "Unknown")
+        COMMIT_URL=$(cat .monitor-cache/current_url.txt 2>/dev/null || echo "")
         
-        # 构造通知内容
-        TITLE="🐳 LobeChat Database Dockerfile 已更新"
-        BODY="📝 ${{ steps.monitor.outputs.commit_message }}
-
-        👤 作者: ${{ steps.monitor.outputs.commit_author }}
-        📅 时间: $FORMATTED_DATE
-        🔍 提交: ${{ steps.monitor.outputs.latest_commit }}
-
-        点击查看详情 →"
+        # 格式化时间
+        if [ "$COMMIT_DATE" != "Unknown" ]; then
+          FORMATTED_DATE=$(date -d "$COMMIT_DATE" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "$COMMIT_DATE")
+        else
+          FORMATTED_DATE="Unknown"
+        fi
+        
+        # 构造 JSON 负载，确保特殊字符被正确转义
+        cat > notification.json <<EOF
+        {
+          "title": "🐳 LobeChat Database Dockerfile 已更新",
+          "body": "📝 ${COMMIT_MESSAGE}\n\n👤 作者: ${COMMIT_AUTHOR}\n📅 时间: ${FORMATTED_DATE}\n🔍 提交: ${LATEST_COMMIT:0:8}\n\n点击查看详情 →",
+          "group": "GitHub监控",
+          "url": "${COMMIT_URL}",
+          "sound": "update",
+          "badge": 1
+        }
+EOF
         
         # 发送通知
-        RESPONSE=$(curl -w "%{http_code}" -s -X POST "$BARK_URL" \
-          -H "Content-Type: application/json; charset=utf-8" \
-          -d "{
-            \"title\": \"$TITLE\",
-            \"body\": \"$BODY\",
-            \"group\": \"GitHub监控\",
-            \"url\": \"${{ steps.monitor.outputs.commit_url }}\",
-            \"sound\": \"update\",
-            \"badge\": 1
-          }")
+        if [ -n "$BARK_URL" ]; then
+          HTTP_CODE=$(curl -w "%{http_code}" -s -o response.txt -X POST "$BARK_URL" \
+            -H "Content-Type: application/json; charset=utf-8" \
+            -d @notification.json)
+          
+          echo "📱 Bark notification sent"
+          echo "📊 HTTP Code: $HTTP_CODE"
+          
+          if [ -f response.txt ]; then
+            echo "📄 Response:"
+            cat response.txt
+          fi
+          
+          # 检查是否发送成功
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ Notification sent successfully"
+          else
+            echo "⚠️  Notification may have failed (HTTP $HTTP_CODE)"
+          fi
+        else
+          echo "❌ BARK_URL not configured"
+          exit 1
+        fi
+
+    - name: Cleanup
+      if: always()
+      run: |
+        # 清理临时文件
+        rm -f notification.json response.txt
         
-        echo "📱 Bark notification sent, response: $RESPONSE"
+        # 显示缓存状态
+        if [ -d .monitor-cache ]; then
+          echo "📁 Cache contents:"
+          ls -la .monitor-cache/ || true
+        fi
