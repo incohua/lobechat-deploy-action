@@ -1,0 +1,113 @@
+name: Enhanced LobeChat Dockerfile Monitor
+
+on:
+  schedule:
+    - cron: "0 */6 * * *" # 每 6 小时检查一次
+  workflow_dispatch:
+    inputs:
+      force_notify:
+        description: 'Force send notification'
+        required: false
+        default: 'false'
+        type: boolean
+
+env:
+  REPO_OWNER: lobehub
+  REPO_NAME: lobe-chat
+  TARGET_FILE: Dockerfile.database
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout current repo
+      uses: actions/checkout@v4
+      
+    - name: Setup monitoring cache
+      uses: actions/cache@v3
+      with:
+        path: |
+          .monitor-cache/
+        key: lobechat-monitor-${{ github.run_id }}
+        restore-keys: |
+          lobechat-monitor-
+
+    - name: Initialize monitoring
+      run: |
+        mkdir -p .monitor-cache
+        
+    - name: Check for changes
+      id: monitor
+      run: |
+        # 获取目标文件的最新提交
+        API_URL="https://api.github.com/repos/${{ env.REPO_OWNER }}/${{ env.REPO_NAME }}/commits"
+        RESPONSE=$(curl -s "$API_URL?path=${{ env.TARGET_FILE }}&per_page=1")
+        
+        if [ "$RESPONSE" = "[]" ]; then
+          echo "❌ File not found or no commits"
+          exit 1
+        fi
+        
+        LATEST_COMMIT=$(echo "$RESPONSE" | jq -r '.[0].sha')
+        COMMIT_MESSAGE=$(echo "$RESPONSE" | jq -r '.[0].commit.message')
+        COMMIT_AUTHOR=$(echo "$RESPONSE" | jq -r '.[0].commit.author.name')
+        COMMIT_DATE=$(echo "$RESPONSE" | jq -r '.[0].commit.author.date')
+        COMMIT_URL=$(echo "$RESPONSE" | jq -r '.[0].html_url')
+        
+        echo "latest_commit=$LATEST_COMMIT" >> $GITHUB_OUTPUT
+        echo "commit_message=$COMMIT_MESSAGE" >> $GITHUB_OUTPUT
+        echo "commit_author=$COMMIT_AUTHOR" >> $GITHUB_OUTPUT
+        echo "commit_date=$COMMIT_DATE" >> $GITHUB_OUTPUT
+        echo "commit_url=$COMMIT_URL" >> $GITHUB_OUTPUT
+        
+        # 检查是否有变更
+        CACHE_FILE=".monitor-cache/last_commit.txt"
+        if [ -f "$CACHE_FILE" ]; then
+          LAST_COMMIT=$(cat "$CACHE_FILE")
+          if [ "$LATEST_COMMIT" != "$LAST_COMMIT" ]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "✅ New changes detected!"
+          else
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "ℹ️  No new changes"
+          fi
+        else
+          echo "has_changes=true" >> $GITHUB_OUTPUT
+          echo "🆕 First time setup"
+        fi
+        
+        # 保存当前提交以供下次比较
+        echo "$LATEST_COMMIT" > "$CACHE_FILE"
+
+    - name: Send Bark notification
+      if: steps.monitor.outputs.has_changes == 'true' || github.event.inputs.force_notify == 'true'
+      env:
+        BARK_URL: ${{ secrets.BARK_URL }}
+      run: |
+        # 格式化时间
+        FORMATTED_DATE=$(date -d "${{ steps.monitor.outputs.commit_date }}" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "${{ steps.monitor.outputs.commit_date }}")
+        
+        # 构造通知内容
+        TITLE="🐳 LobeChat Database Dockerfile 已更新"
+        BODY="📝 ${{ steps.monitor.outputs.commit_message }}
+
+        👤 作者: ${{ steps.monitor.outputs.commit_author }}
+        📅 时间: $FORMATTED_DATE
+        🔍 提交: ${{ steps.monitor.outputs.latest_commit }}
+
+        点击查看详情 →"
+        
+        # 发送通知
+        RESPONSE=$(curl -w "%{http_code}" -s -X POST "$BARK_URL" \
+          -H "Content-Type: application/json; charset=utf-8" \
+          -d "{
+            \"title\": \"$TITLE\",
+            \"body\": \"$BODY\",
+            \"group\": \"GitHub监控\",
+            \"url\": \"${{ steps.monitor.outputs.commit_url }}\",
+            \"sound\": \"update\",
+            \"badge\": 1
+          }")
+        
+        echo "📱 Bark notification sent, response: $RESPONSE"
