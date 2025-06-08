@@ -1,4 +1,4 @@
-name: Monitor Dockerfile.database Changes
+name: Monitor Dockerfile_database Changes
 
 on:
   schedule:
