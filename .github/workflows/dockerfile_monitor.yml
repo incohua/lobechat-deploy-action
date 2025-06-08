@@ -1,4 +1,4 @@
-name: Monitor LobeChat Construct Files
+name: remote-repo-file-monitor
 
 on:
   schedule:

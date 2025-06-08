@@ -1,4 +1,4 @@
-name: Check_Release
+name: release-check
 
 on:
   schedule:
