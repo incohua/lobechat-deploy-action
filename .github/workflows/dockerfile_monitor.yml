@@ -44,10 +44,42 @@ jobs:
         echo "Last SHA: $LAST_SHA"
         echo "Current SHA: $CURRENT_SHA"
         
-        # 检查变更逻辑...
-        # (保持原有逻辑，但添加错误处理)
+        # 初始化输出变量
+        echo "dockerfile_changed=false" >> $GITHUB_OUTPUT
+        echo "workflow_changed=false" >> $GITHUB_OUTPUT
+        echo "commit_message=" >> $GITHUB_OUTPUT
+        echo "commit_sha=$CURRENT_SHA" >> $GITHUB_OUTPUT
+        
+        # 如果是首次运行或 SHA 相同，跳过检查
+        if [ -z "$LAST_SHA" ] || [ "$LAST_SHA" = "$CURRENT_SHA" ]; then
+          echo "No changes detected or first run"
+          echo "$CURRENT_SHA" > ../last_sha.txt
+          exit 0
+        fi
+        
+        # 获取最新提交信息
+        COMMIT_MESSAGE=$(git log -1 --pretty=format:"%s")
+        echo "commit_message=$COMMIT_MESSAGE" >> $GITHUB_OUTPUT
+        echo "Latest commit: $COMMIT_MESSAGE"
+        
+        # 检查 Dockerfile.database 是否在变更中
+        if git diff --name-only "$LAST_SHA".."$CURRENT_SHA" | grep -q "^Dockerfile\.database$"; then
+          echo "Dockerfile.database has changed!"
+          echo "dockerfile_changed=true" >> $GITHUB_OUTPUT
+        else
+          echo "Dockerfile.database unchanged"
+        fi
+        
+        # 检查 workflow 文件是否变更
+        if git diff --name-only "$LAST_SHA".."$CURRENT_SHA" | grep -q "^\.github/workflows/docker-database\.yml$"; then
+          echo "docker-database.yml workflow has changed!"
+          echo "workflow_changed=true" >> $GITHUB_OUTPUT
+        else
+          echo "docker-database.yml workflow unchanged"
+        fi
         
         # 更新SHA记录
+        cd ..
         echo "$CURRENT_SHA" > last_sha.txt
     
     - name: Save last SHA cache
@@ -55,7 +87,7 @@ jobs:
       if: always()
       with:
         path: last_sha.txt
-        key: lobehub-last-sha-${{ github.run_number }}
+        key: lobehub-last-sha
     
     - name: Send Bark notification for Dockerfile.database
       if: steps.check_changes.outputs.dockerfile_changed == 'true'
